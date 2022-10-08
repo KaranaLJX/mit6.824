@@ -19,13 +19,15 @@ package raft
 
 import (
 	//	"bytes"
+
+	"math/rand"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	//	"6.824/labgob"
 	"6.824/labrpc"
 )
-
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -61,10 +63,33 @@ type Raft struct {
 	dead      int32               // set by Kill()
 
 	// Your data here (2A, 2B, 2C).
+	//2A
+	status  RaftStatus //Raft Node 状态
+	curTerm int        //当前term
+	voteFor int        //给哪个candidateID投过票
+
+	heartBreakTimer *time.Timer //心跳timer
+	electionTimer   *time.Timer //选举timer
+
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
 }
+
+//
+type RaftStatus int32
+
+const (
+	Status_Follower  = 0
+	Status_Leader    = 1
+	Status_Candidate = 2
+)
+
+const (
+	electionTimeout   = 1000
+	heartBreakTimeout = 150
+	timeoutUint       = time.Millisecond
+)
 
 // return currentTerm and whether this server
 // believes it is the leader.
@@ -92,7 +117,6 @@ func (rf *Raft) persist() {
 	// rf.persister.SaveRaftState(data)
 }
 
-
 //
 // restore previously persisted state.
 //
@@ -115,7 +139,6 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 }
 
-
 //
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
 // have more recent info since it communicate the snapshot on applyCh.
@@ -136,21 +159,33 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 }
 
-
 //
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
+// 参考fig2的RequestVoteRpc
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	term        int //请求候选人的term
+	candidateId int //请求候选人
+}
+
+//
+//根据节点生成 ReqVoteArgs
+//
+func (rf *Raft) genRequestVoteArgs() *RequestVoteArgs {
+	return &RequestVoteArgs{term: rf.curTerm, candidateId: rf.me}
 }
 
 //
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
+// 参考fig2的RequestVoteRpc
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
+	term        int  //本节点的term
+	voteGranted bool //是否投票
 }
 
 //
@@ -158,6 +193,17 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if args.term < rf.curTerm || (args.term == rf.curTerm && rf.voteFor != -1 && rf.voteFor != args.candidateId) {
+		reply.term, reply.voteGranted = rf.curTerm, false
+		return
+	}
+	if args.term > rf.curTerm {
+		rf.status = Status_Follower
+		rf.curTerm = args.term
+	}
+	reply.term, reply.voteGranted = rf.curTerm, true
 }
 
 //
@@ -194,7 +240,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-
 //
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -215,7 +260,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
-
 
 	return index, term, isLeader
 }
@@ -241,6 +285,46 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
+//
+//开启选举，见论文$5.2 To Begin a election ...
+//先投自己，异步询问其他peers
+//当自己仍是候选人，且获得票数过半，转为leader
+//当其他人的term大于当前term，转为follwer
+//
+func (rf *Raft) StartElection() {
+	//rf.mu.Lock()不能在主协程加锁，cuz外部有锁
+	rf.voteFor = rf.me
+	grantCnt := 1
+	req := rf.genRequestVoteArgs()
+	for peer := range rf.peers {
+		if peer == rf.me {
+			continue
+		}
+		go func(peer int) {
+			//异步请求投票，可以加锁
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
+			resp := new(RequestVoteReply)
+			rf.sendRequestVote(peer, req, resp)
+			if rf.curTerm == resp.term && rf.status == Status_Candidate {
+				if resp.voteGranted {
+					grantCnt++
+					if grantCnt > len(rf.peers)/2 {
+						rf.status = Status_Leader
+						//TODO: 发送广播
+
+					}
+				}
+				if resp.term > req.term {
+					rf.status = Status_Follower
+					rf.curTerm = resp.term
+					rf.voteFor = -1
+				}
+			}
+		}(peer)
+	}
+}
+
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
 func (rf *Raft) ticker() {
@@ -249,6 +333,29 @@ func (rf *Raft) ticker() {
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
 		// time.Sleep().
+		select {
+		//2A
+		case <-rf.heartBreakTimer.C:
+			{
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
+				if rf.status == Status_Leader {
+					//TODO: 发送心跳
+					//
+					rf.heartBreakTimer.Reset(heartBreakTimeout * timeoutUint)
+				}
+			}
+		case <-rf.electionTimer.C:
+			{
+				//转换状态 term+1 异步开启选举 重置timeout
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
+				rf.status = Status_Candidate
+				rf.curTerm = rf.curTerm + 1
+				rf.StartElection()
+				rf.electionTimer.Reset(RandomElectionTimeout())
+			}
+		}
 
 	}
 }
@@ -272,6 +379,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+	//2A
+	rf.voteFor = -1
+	rf.heartBreakTimer = time.NewTimer(heartBreakTimeout * timeoutUint)
+	rf.electionTimer = time.NewTimer(RandomElectionTimeout())
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -279,6 +390,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// start ticker goroutine to start elections
 	go rf.ticker()
 
-
 	return rf
+}
+
+func RandomElectionTimeout() time.Duration {
+	return time.Duration((electionTimeout + rand.Intn(electionTimeout)) * int(timeoutUint))
 }
