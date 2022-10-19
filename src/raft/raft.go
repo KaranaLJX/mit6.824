@@ -166,15 +166,15 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
-	term        int //请求候选人的term
-	candidateId int //请求候选人
+	Term        int //请求候选人的term
+	CandidateId int //请求候选人
 }
 
 //
 //根据节点生成 ReqVoteArgs
 //
 func (rf *Raft) genRequestVoteArgs() *RequestVoteArgs {
-	return &RequestVoteArgs{term: rf.curTerm, candidateId: rf.me}
+	return &RequestVoteArgs{Term: rf.curTerm, CandidateId: rf.me}
 }
 
 //
@@ -184,26 +184,84 @@ func (rf *Raft) genRequestVoteArgs() *RequestVoteArgs {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
-	term        int  //本节点的term
-	voteGranted bool //是否投票
+	Term        int  //本节点的term
+	VoteGranted bool //是否投票
 }
 
-//
+//args.Term
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+	DPrintf("%s receive vote from %+v", rf.LogPrefix(), *args)
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if args.term < rf.curTerm || (args.term == rf.curTerm && rf.voteFor != -1 && rf.voteFor != args.candidateId) {
-		reply.term, reply.voteGranted = rf.curTerm, false
+	if args.Term < rf.curTerm || (args.Term == rf.curTerm && rf.voteFor != -1 && rf.voteFor != args.CandidateId) {
+		DPrintf("%s reject vote %+v", rf.LogPrefix(), *args)
+		reply.Term, reply.VoteGranted = rf.curTerm, false
 		return
 	}
-	if args.term > rf.curTerm {
-		rf.status = Status_Follower
-		rf.curTerm = args.term
+	DPrintf("%s agree vote %+v", rf.LogPrefix(), *args)
+
+	// if args.Term  > rf.curTerm {
+	rf.status = Status_Follower
+	rf.curTerm = args.Term
+	//}
+	reply.Term, reply.VoteGranted = rf.curTerm, true
+}
+
+//
+// leader添加提交日志
+//
+type AppendEntriesArgs struct {
+	// Your data here (2A, 2B).
+	Term     int //请求候选人的term
+	LeaderID int //领导者id
+
+}
+
+//
+//根据节点生成 ReqVoteArgs
+//
+func (rf *Raft) genAppendEntriesArgs() *AppendEntriesArgs {
+	return &AppendEntriesArgs{Term: rf.curTerm, LeaderID: rf.me}
+}
+
+//
+// example AppendEntries RPC reply structure.
+// field names must start with capital letters!
+// 参考fig2的AppendEntriesRpc
+//
+type AppendEntriesReply struct {
+	// Your data here (2A).
+}
+
+//
+// example AppendEntries RPC handler.
+//
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	// Your code here (2A, 2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if args.Term < rf.curTerm {
+		DPrintf("%s leader term [%+v] less than curterm",
+			rf.LogPrefix(), args)
+		return
 	}
-	reply.term, reply.voteGranted = rf.curTerm, true
+	if args.Term > rf.curTerm {
+		rf.curTerm, rf.voteFor = args.Term, -1
+	}
+
+	// if args.Term  > rf.curTerm {
+	rf.status = Status_Follower
+	isReset := rf.electionTimer.Reset(RandomElectionTimeout())
+	DPrintf("%s receive heartbreak from leader [%+v] reset %v", rf.LogPrefix(), args, isReset)
+}
+
+//
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
 }
 
 //
@@ -293,6 +351,7 @@ func (rf *Raft) killed() bool {
 //
 func (rf *Raft) StartElection() {
 	//rf.mu.Lock()不能在主协程加锁，cuz外部有锁
+	DPrintf("%s start election", rf.LogPrefix())
 	rf.voteFor = rf.me
 	grantCnt := 1
 	req := rf.genRequestVoteArgs()
@@ -306,18 +365,21 @@ func (rf *Raft) StartElection() {
 			defer rf.mu.Unlock()
 			resp := new(RequestVoteReply)
 			rf.sendRequestVote(peer, req, resp)
-			if rf.curTerm == resp.term && rf.status == Status_Candidate {
-				if resp.voteGranted {
+			if rf.curTerm == resp.Term && rf.status == Status_Candidate {
+				if resp.VoteGranted {
+					DPrintf("%s recevice agree from %v  reply %+v", rf.LogPrefix(), peer, *resp)
+
 					grantCnt++
 					if grantCnt > len(rf.peers)/2 {
 						rf.status = Status_Leader
 						//TODO: 发送广播
+						rf.SendHeartBreaker()
 
 					}
 				}
-				if resp.term > req.term {
+				if resp.Term > req.Term {
 					rf.status = Status_Follower
-					rf.curTerm = resp.term
+					rf.curTerm = resp.Term
 					rf.voteFor = -1
 				}
 			}
@@ -328,7 +390,7 @@ func (rf *Raft) StartElection() {
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
 func (rf *Raft) ticker() {
-	for rf.killed() == false {
+	for !rf.killed() {
 
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
@@ -338,25 +400,43 @@ func (rf *Raft) ticker() {
 		case <-rf.heartBreakTimer.C:
 			{
 				rf.mu.Lock()
-				defer rf.mu.Unlock()
+				DPrintf("%s heartbreak timeout", rf.LogPrefix())
 				if rf.status == Status_Leader {
-					//TODO: 发送心跳
-					//
+					DPrintf("%s leader heartbreak timeout", rf.LogPrefix())
+
+					rf.SendHeartBreaker()
 					rf.heartBreakTimer.Reset(heartBreakTimeout * timeoutUint)
 				}
+				rf.mu.Unlock()
 			}
 		case <-rf.electionTimer.C:
 			{
+
 				//转换状态 term+1 异步开启选举 重置timeout
 				rf.mu.Lock()
-				defer rf.mu.Unlock()
+				DPrintf("%s election timeout", rf.LogPrefix())
 				rf.status = Status_Candidate
 				rf.curTerm = rf.curTerm + 1
 				rf.StartElection()
 				rf.electionTimer.Reset(RandomElectionTimeout())
+				rf.mu.Unlock()
 			}
 		}
 
+	}
+}
+
+//
+//  领导者发送心跳
+//
+func (rf *Raft) SendHeartBreaker() {
+	req := rf.genAppendEntriesArgs()
+	reply := &AppendEntriesReply{}
+	for peer := range rf.peers {
+		if rf.me != peer {
+			DPrintf("%s sendheartBreak %+v", rf.LogPrefix(), req)
+			go rf.sendAppendEntries(peer, req, reply)
+		}
 	}
 }
 
@@ -373,10 +453,13 @@ func (rf *Raft) ticker() {
 //
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
-	rf := &Raft{}
-	rf.peers = peers
-	rf.persister = persister
-	rf.me = me
+	rf := &Raft{
+		peers:     peers,
+		persister: persister,
+		me:        me,
+		dead:      0,
+		mu:        sync.Mutex{},
+	}
 
 	// Your initialization code here (2A, 2B, 2C).
 	//2A
@@ -389,7 +472,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
-
+	DPrintf("%s peer server start", rf.LogPrefix())
 	return rf
 }
 
