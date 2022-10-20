@@ -87,17 +87,21 @@ const (
 
 const (
 	electionTimeout   = 1000
-	heartBreakTimeout = 150
+	heartBreakTimeout = 125
 	timeoutUint       = time.Millisecond
 )
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
 	var term int
 	var isleader bool
 	// Your code here (2A).
+	term = rf.curTerm
+	isleader = rf.status == Status_Leader
 	return term, isleader
 }
 
@@ -107,6 +111,7 @@ func (rf *Raft) GetState() (int, bool) {
 // see paper's Figure 2 for a description of what should be persistent.
 //
 func (rf *Raft) persist() {
+
 	// Your code here (2C).
 	// Example:
 	// w := new(bytes.Buffer)
@@ -294,6 +299,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // the struct itself.
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+	DPrintf("%s send to peer %v agrs %+v", rf.LogPrefix(), server, args)
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
 }
@@ -336,6 +342,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+	DPrintf("%s is killed", rf.LogPrefix())
 }
 
 func (rf *Raft) killed() bool {
@@ -356,31 +363,37 @@ func (rf *Raft) StartElection() {
 	grantCnt := 1
 	req := rf.genRequestVoteArgs()
 	for peer := range rf.peers {
+		DPrintf("%s to peer %v all peers %v", rf.LogPrefix(), peer, len(rf.peers))
+
 		if peer == rf.me {
 			continue
 		}
 		go func(peer int) {
 			//异步请求投票，可以加锁
-			rf.mu.Lock()
-			defer rf.mu.Unlock()
+			DPrintf("%s come in to peer %v all peers %v", rf.LogPrefix(), peer, len(rf.peers))
+
 			resp := new(RequestVoteReply)
-			rf.sendRequestVote(peer, req, resp)
-			if rf.curTerm == resp.Term && rf.status == Status_Candidate {
-				if resp.VoteGranted {
-					DPrintf("%s recevice agree from %v  reply %+v", rf.LogPrefix(), peer, *resp)
+			if rf.sendRequestVote(peer, req, resp) {
+				//当且仅当发送请求成功后才加锁，不然发送失败后，会阻塞锁
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
+				if rf.curTerm == resp.Term && rf.status == Status_Candidate {
+					if resp.VoteGranted {
+						DPrintf("%s recevice agree from %v  reply %+v", rf.LogPrefix(), peer, *resp)
 
-					grantCnt++
-					if grantCnt > len(rf.peers)/2 {
-						rf.status = Status_Leader
-						//TODO: 发送广播
-						rf.SendHeartBreaker()
+						grantCnt++
+						if grantCnt > len(rf.peers)/2 {
+							rf.status = Status_Leader
+							//TODO: 发送广播
+							rf.SendHeartBreaker()
 
+						}
 					}
-				}
-				if resp.Term > req.Term {
-					rf.status = Status_Follower
-					rf.curTerm = resp.Term
-					rf.voteFor = -1
+					if resp.Term > req.Term {
+						rf.status = Status_Follower
+						rf.curTerm = resp.Term
+						rf.voteFor = -1
+					}
 				}
 			}
 		}(peer)
@@ -399,14 +412,16 @@ func (rf *Raft) ticker() {
 		//2A
 		case <-rf.heartBreakTimer.C:
 			{
+				if rf.curTerm > 1 {
+					DPrintf("%s heartbreak timeout", rf.LogPrefix())
+				}
 				rf.mu.Lock()
-				DPrintf("%s heartbreak timeout", rf.LogPrefix())
 				if rf.status == Status_Leader {
 					DPrintf("%s leader heartbreak timeout", rf.LogPrefix())
-
+					rf.electionTimer.Reset(RandomElectionTimeout())
 					rf.SendHeartBreaker()
-					rf.heartBreakTimer.Reset(heartBreakTimeout * timeoutUint)
 				}
+				rf.heartBreakTimer.Reset(heartBreakTimeout * timeoutUint)
 				rf.mu.Unlock()
 			}
 		case <-rf.electionTimer.C:

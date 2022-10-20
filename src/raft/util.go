@@ -18,5 +18,5 @@ func (rf *Raft) LogPrefix() string {
 
 	// Your code here (2D).
 
-	return fmt.Sprintf("[%v]|[%v]", rf.me, rf.curTerm)
+	return fmt.Sprintf("[id %v]|[term %v]|[isLeader %v]", rf.me, rf.curTerm, rf.status == Status_Leader)
 }
