@@ -56,7 +56,7 @@ type ApplyMsg struct {
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
-	mu        sync.Mutex          // Lock to protect shared access to this peer's state
+	mu        sync.RWMutex        // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
@@ -70,6 +70,16 @@ type Raft struct {
 
 	heartBreakTimer *time.Timer //心跳timer
 	electionTimer   *time.Timer //选举timer
+
+	//2B
+	applyCh       chan ApplyMsg
+	entry         []Entry      //日志
+	commitIndex   int          //最后一个提交的日志索引
+	applIndex     int          //最后一个已应用的日志索引
+	applyCond     *sync.Cond   //提交日志的cond
+	matchIndex    []int        //各个peer的matchIndex
+	nextIndex     []int        //各个peer的nextIndex
+	replicateCond []*sync.Cond //同步peer日志的条件变量
 
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
@@ -216,51 +226,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 }
 
 //
-// leader添加提交日志
+//日志
 //
-type AppendEntriesArgs struct {
-	// Your data here (2A, 2B).
-	Term     int //请求候选人的term
-	LeaderID int //领导者id
-
-}
-
-//
-//根据节点生成 ReqVoteArgs
-//
-func (rf *Raft) genAppendEntriesArgs() *AppendEntriesArgs {
-	return &AppendEntriesArgs{Term: rf.curTerm, LeaderID: rf.me}
-}
-
-//
-// example AppendEntries RPC reply structure.
-// field names must start with capital letters!
-// 参考fig2的AppendEntriesRpc
-//
-type AppendEntriesReply struct {
-	// Your data here (2A).
-}
-
-//
-// example AppendEntries RPC handler.
-//
-func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	// Your code here (2A, 2B).
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	if args.Term < rf.curTerm {
-		DPrintf("%s leader term [%+v] less than curterm",
-			rf.LogPrefix(), args)
-		return
-	}
-	if args.Term > rf.curTerm {
-		rf.curTerm, rf.voteFor = args.Term, -1
-	}
-
-	// if args.Term  > rf.curTerm {
-	rf.status = Status_Follower
-	isReset := rf.electionTimer.Reset(RandomElectionTimeout())
-	DPrintf("%s receive heartbreak from leader [%+v] reset %v", rf.LogPrefix(), args, isReset)
+type Entry struct {
+	Index   int         //日志索引
+	Term    int         //日志Term
+	Command interface{} //命令内容
 }
 
 //
@@ -317,6 +288,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // if it's ever committed. the second return value is the current
 // term. the third return value is true if this server believes it is
 // the leader.
+//
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
@@ -473,7 +445,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		persister: persister,
 		me:        me,
 		dead:      0,
-		mu:        sync.Mutex{},
+		mu:        sync.RWMutex{},
 	}
 
 	// Your initialization code here (2A, 2B, 2C).
@@ -481,6 +453,18 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.voteFor = -1
 	rf.heartBreakTimer = time.NewTimer(heartBreakTimeout * timeoutUint)
 	rf.electionTimer = time.NewTimer(RandomElectionTimeout())
+
+	//2B
+	//开启n个同步日志routinue
+	for peer := range peers {
+		rf.matchIndex = append(rf.matchIndex, 0)
+		rf.nextIndex = append(rf.nextIndex, 0)
+		rf.replicateCond = append(rf.replicateCond, &sync.Cond{})
+		go rf.Replicator(peer)
+	}
+
+	//开启提交日志协程
+	go rf.ApplyEntry()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
