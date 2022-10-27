@@ -127,30 +127,63 @@ func (rf *Raft) SendOneBroadcast(peer int) {
 	req := rf.genAppendEntriesArgs()
 	req.PreLogIndex = rf.nextIndex[peer] - 1
 	pos := rf.GetPosByIndex(rf.nextIndex[peer] - 1)
+	if pos < 0 {
+		//leader太超前 TODO，发送snatshot
+		rf.mu.RUnlock()
+		return
+	}
+	if pos >= len(rf.entry) {
+		//leader落后 TODO 怎么处理？
+		rf.mu.RUnlock()
+		return
+	}
 	req.PreLogTerm = rf.entry[pos].Term
 	req.Entries = rf.entry[pos:]
-	rf.mu.RUnlock()
 	resp := &AppendEntriesReply{}
 	if rf.sendAppendEntries(peer, req, resp) {
 		rf.mu.Lock()
 		defer rf.mu.Lock()
-		//成为候选人
-		if resp.Term > rf.curTerm {
-			rf.status = Status_Candidate
-			rf.voteFor = -1
-			rf.curTerm = resp.Term
-			return
-		}
-		//处理成功
-		if resp.Success && resp.Term == rf.curTerm {
-			rf.matchIndex[peer] = req.PreLogIndex + len(req.Entries)
-			rf.nextIndex[peer] = rf.matchIndex[peer] + 1
-			rf.AddCommitIndex()
-		}
-		//处理冲突
-
+		rf.HandleBroadCastResp(peer, req, resp)
 	}
 
+}
+
+//
+//处理结果
+//
+func (rf *Raft) HandleBroadCastResp(peer int, req *AppendEntriesArgs, resp *AppendEntriesReply) {
+	//成为候选人
+	if resp.Term > rf.curTerm {
+		rf.status = Status_Candidate
+		rf.voteFor = -1
+		rf.curTerm = resp.Term
+		return
+	}
+	//处理成功
+	if resp.Success && resp.Term == rf.curTerm {
+		rf.matchIndex[peer] = req.PreLogIndex + len(req.Entries)
+		rf.nextIndex[peer] = rf.matchIndex[peer] + 1
+		rf.AddCommitIndex()
+		return
+	}
+	//处理冲突,回退nextIndex
+	if resp.Term == rf.curTerm {
+		cPos := rf.GetPosByIndex(resp.ConflitIndex)
+		if resp.ConflitTerm != -1 {
+			//找到最后一个term跟冲突term相同的pos
+			for cPos = len(rf.entry) - 1; cPos >= 0; cPos-- {
+				if rf.entry[cPos].Term == resp.ConflitTerm {
+					break
+				}
+			}
+		}
+		if cPos < 0 {
+			//TODO如何处理conflitIndex不存在
+			return
+		}
+		rf.nextIndex[peer] = rf.entry[cPos].Index + 1
+
+	}
 }
 
 //
@@ -188,12 +221,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	//term 太小，不接受心跳
 	if args.Term < rf.curTerm {
 		DPrintf("%s leader term [%+v] less than curterm",
 			rf.LogPrefix(), args)
 		reply.Term = rf.curTerm
 		return
 	}
+	//term相等，但是commitIndex太小，不接受心跳
+	if args.Term == rf.curTerm && args.LeaderComimit < rf.commitIndex {
+		DPrintf("%s commit index too small args %+v", rf.LogPrefix(), *args)
+	}
+	//接受心跳，重设election timer
 	if args.Term > rf.curTerm {
 		rf.curTerm, rf.voteFor = args.Term, -1
 	}
@@ -201,4 +240,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.status = Status_Follower
 	isReset := rf.electionTimer.Reset(RandomElectionTimeout())
 	DPrintf("%s receive heartbreak from leader [%+v] reset %v", rf.LogPrefix(), args, isReset)
+
+	//日志同步
+	SyncEntry(args, reply)
+
+}
+
+//
+//peer日志同步leader
+//
+func SyncEntry(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+
 }
