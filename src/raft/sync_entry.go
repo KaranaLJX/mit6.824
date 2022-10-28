@@ -226,6 +226,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		DPrintf("%s leader term [%+v] less than curterm",
 			rf.LogPrefix(), args)
 		reply.Term = rf.curTerm
+		reply.ConflitTerm = -1
 		return
 	}
 	//term相等，但是commitIndex太小，不接受心跳
@@ -236,19 +237,61 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term > rf.curTerm {
 		rf.curTerm, rf.voteFor = args.Term, -1
 	}
-
+	reply.Term = rf.curTerm
 	rf.status = Status_Follower
 	isReset := rf.electionTimer.Reset(RandomElectionTimeout())
 	DPrintf("%s receive heartbreak from leader [%+v] reset %v", rf.LogPrefix(), args, isReset)
 
 	//日志同步
-	SyncEntry(args, reply)
+	rf.SyncEntry(args, reply)
 
 }
 
 //
-//peer日志同步leader
+//peer日志同步leader日志
 //
-func SyncEntry(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+func (rf *Raft) SyncEntry(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	pos := rf.GetPosByIndex(args.PreLogTerm)
+	//prelog找不到 TODO:how to handle
+	if pos < 0 || pos >= len(rf.entry) {
+		reply.ConflitTerm = 0
+		return
+	}
+	//不match
+	if rf.entry[pos].Term != args.PreLogTerm {
+		reply.ConflitIndex = args.PreLogIndex
+		reply.ConflitTerm = rf.entry[pos].Term
+		for i := 0; i < len(rf.entry); i++ {
+			if rf.entry[i].Term == reply.ConflitTerm {
+				reply.ConflitIndex = rf.entry[i].Index
+				break
+			}
+		}
+		return
+	}
 
+	//没有任何日志匹配
+	lPos := rf.GetPosByIndex(args.Entries[0].Index)
+	rPos := rf.GetPosByIndex(args.Entries[len(args.Entries)-1].Index)
+	if lPos > len(rf.entry) {
+		reply.ConflitTerm = rf.entry[pos].Term
+		reply.ConflitIndex = args.PreLogIndex + 1
+	}
+	//如有不同，全部替换
+	curPos := lPos
+	for ; curPos <= rPos && curPos < len(rf.entry); curPos++ {
+		if rf.entry[curPos].Term != args.Entries[curPos-lPos].Term {
+			break
+		}
+	}
+	if curPos <= rPos {
+		rf.entry = append(rf.entry[:curPos], args.Entries[curPos-lPos:]...)
+	}
+	reply.Success = true
+	rf.commitIndex = args.LeaderComimit
+	rf.applyCond.Signal()
 }
+
+//
+//
+//
