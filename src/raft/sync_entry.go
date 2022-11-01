@@ -4,6 +4,9 @@ package raft
 //获取Index的位置
 //
 func (rf *Raft) GetPosByIndex(index int) int {
+	if len(rf.entry) == 0 {
+		return -1
+	}
 	firstIndex := rf.entry[0].Index
 	return index - firstIndex
 }
@@ -12,6 +15,9 @@ func (rf *Raft) GetPosByIndex(index int) int {
 //获取最后一个index
 //
 func (rf *Raft) GetLastIndex() int {
+	if len(rf.entry) == 0 {
+		return -1
+	}
 	return rf.entry[len(rf.entry)-1].Index
 }
 
@@ -19,19 +25,26 @@ func (rf *Raft) GetLastIndex() int {
 //  复制协程
 //
 func (rf *Raft) Replicator(peer int) {
-	rf.replicateCond[peer].L.Lock()
-	defer rf.replicateCond[peer].L.Lock()
-	rf.mu.RLock()
-	if !(rf.status == Status_Leader && rf.matchIndex[peer] >= rf.GetLastIndex()) {
-		rf.mu.RUnlock()
-		rf.replicateCond[peer].Wait()
-	}
-	// rf.mu.RLock()
-	// defer rf.mu.RUnlock()
-	//TODO: 这里如何加锁
-	for rf.status == Status_Leader && rf.matchIndex[peer] >= rf.commitIndex {
-		//这里不应该go 出去，因为广播发送结束后才可能
-		rf.SendOneBroadcast(peer)
+	for !rf.killed() {
+		rf.replicateCond[peer].L.Lock()
+		rf.mu.RLock()
+		if !(rf.status == Status_Leader && rf.matchIndex[peer] >= rf.GetLastIndex()) {
+			rf.mu.RUnlock()
+			DPrintf("[Replicator] %v | peer %v do not need to Replicate", rf.LogPrefix(), peer)
+			rf.replicateCond[peer].Wait()
+		}
+		rf.mu.RLock()
+
+		// rf.mu.RLock()
+		// defer rf.mu.RUnlock()
+		//TODO: 这里如何加锁
+		for rf.status == Status_Leader && rf.matchIndex[peer] >= rf.commitIndex {
+			//这里不应该go 出去，因为广播发送结束后才可能
+			DPrintf("[Replicator] %v | peer %v match %v commit %v", rf.LogPrefix(), peer, rf.matchIndex[peer], rf.commitIndex)
+
+			rf.SendOneBroadcast(peer)
+		}
+		rf.replicateCond[peer].L.Lock()
 	}
 }
 
@@ -39,32 +52,39 @@ func (rf *Raft) Replicator(peer int) {
 //提交日志协程
 //
 func (rf *Raft) ApplyEntry() {
-	rf.applyCond.L.Lock()
-	defer rf.applyCond.L.Unlock()
-	rf.mu.Lock()
-	if rf.commitIndex <= rf.applIndex {
-		rf.applyCond.Wait()
-		rf.mu.Unlock()
-	}
-	// rf.mu.RLock()
-	// defer rf.mu.RUnlock()
-	//TODO: 这里如何加锁
-	for rf.applIndex < rf.commitIndex {
-		var entryToApply []Entry
+	for !rf.killed() {
+		rf.applyCond.L.Lock()
+		//TODO: for or if
 		rf.mu.RLock()
-		entryToApply = rf.entry[rf.GetPosByIndex(rf.applIndex):]
-		rf.mu.RLock()
-		//这一块耗时很高，需要并发???
-		for _, e := range entryToApply {
-			rf.applyCh <- ApplyMsg{
-				CommandValid: true,
-				CommandIndex: e.Index,
-				Command:      e.Command,
-			}
+		if rf.commitIndex <= rf.applIndex {
+			rf.mu.RUnlock()
+			DPrintf("[ApplyEntry] %v |  no need to apply", rf.LogPrefix())
+			rf.applyCond.Wait()
 		}
-		rf.mu.Lock()
-		rf.applIndex = rf.commitIndex
-		rf.mu.Unlock()
+		rf.mu.RUnlock()
+
+		// rf.mu.RLock()
+		// defer rf.mu.RUnlock()
+		//TODO: 这里如何加锁
+		for rf.applIndex < rf.commitIndex {
+			DPrintf("[ApplyEntry] %v | apply %v commit %v", rf.LogPrefix(), rf.applIndex, rf.commitIndex)
+			var entryToApply []*Entry
+			rf.mu.RLock()
+			entryToApply = rf.entry[rf.GetPosByIndex(rf.applIndex):]
+			rf.mu.RLock()
+			//这一块耗时很高，需要并发???
+			for _, e := range entryToApply {
+				rf.applyCh <- ApplyMsg{
+					CommandValid: true,
+					CommandIndex: e.Index,
+					Command:      e.Command,
+				}
+			}
+			rf.mu.Lock()
+			rf.applIndex = rf.commitIndex
+			rf.mu.Unlock()
+		}
+		rf.applyCond.L.Unlock()
 	}
 
 }
@@ -73,7 +93,7 @@ func (rf *Raft) ApplyEntry() {
 //发送日志同步广播
 //
 func (rf *Raft) Broadcast(isHeartBreak bool) {
-	for !rf.killed() && rf.status == Status_Leader {
+	if !rf.killed() && rf.status == Status_Leader {
 		for peer := range rf.peers {
 			if isHeartBreak {
 				go rf.SendOneBroadcast(peer)
@@ -89,12 +109,12 @@ func (rf *Raft) Broadcast(isHeartBreak bool) {
 //
 type AppendEntriesArgs struct {
 	// Your data here (2A, 2B).
-	Term          int     //请求候选人的term
-	LeaderID      int     //领导者id
-	PreLogIndex   int     //上一次同步的日志索引
-	PreLogTerm    int     //上一次同步日的任期
-	Entries       []Entry //同步的日志
-	LeaderComimit int     //领导者的已提交的日志的最高索引
+	Term          int      //请求候选人的term
+	LeaderID      int      //领导者id
+	PreLogIndex   int      //上一次同步的日志索引
+	PreLogTerm    int      //上一次同步日的任期
+	Entries       []*Entry //同步的日志
+	LeaderComimit int      //领导者的已提交的日志的最高索引
 
 }
 

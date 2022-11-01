@@ -73,7 +73,7 @@ type Raft struct {
 
 	//2B
 	applyCh       chan ApplyMsg
-	entry         []Entry      //日志
+	entry         []*Entry     //日志
 	commitIndex   int          //最后一个提交的日志索引
 	applIndex     int          //最后一个已应用的日志索引
 	applyCond     *sync.Cond   //提交日志的cond
@@ -270,7 +270,6 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // the struct itself.
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	DPrintf("%s send to peer %v agrs %+v", rf.LogPrefix(), server, args)
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
 }
@@ -293,11 +292,23 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
-	isLeader := true
-
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.status != Status_Leader {
+		return index, term, false
+	}
+	if len(rf.entry) == 0 {
+		index = 1
+	} else {
+		index = rf.GetLastIndex() + 1
+	}
+	term = rf.curTerm
+	rf.entry = append(rf.entry, &Entry{index, term, command})
+	DPrintf("[Start] %s receive command index %v", rf.LogPrefix(), index)
+	go rf.Broadcast(false)
+	return index, term, true
 	// Your code here (2B).
 
-	return index, term, isLeader
 }
 
 //
@@ -335,14 +346,12 @@ func (rf *Raft) StartElection() {
 	grantCnt := 1
 	req := rf.genRequestVoteArgs()
 	for peer := range rf.peers {
-		DPrintf("%s to peer %v all peers %v", rf.LogPrefix(), peer, len(rf.peers))
 
 		if peer == rf.me {
 			continue
 		}
 		go func(peer int) {
 			//异步请求投票，可以加锁
-			DPrintf("%s come in to peer %v all peers %v", rf.LogPrefix(), peer, len(rf.peers))
 
 			resp := new(RequestVoteReply)
 			if rf.sendRequestVote(peer, req, resp) {
@@ -357,7 +366,7 @@ func (rf *Raft) StartElection() {
 						if grantCnt > len(rf.peers)/2 {
 							rf.status = Status_Leader
 							//TODO: 发送广播
-							rf.SendHeartBreaker()
+							rf.Broadcast(true)
 
 						}
 					}
@@ -391,7 +400,7 @@ func (rf *Raft) ticker() {
 				if rf.status == Status_Leader {
 					DPrintf("%s leader heartbreak timeout", rf.LogPrefix())
 					rf.electionTimer.Reset(RandomElectionTimeout())
-					rf.SendHeartBreaker()
+					rf.Broadcast(true)
 				}
 				rf.heartBreakTimer.Reset(heartBreakTimeout * timeoutUint)
 				rf.mu.Unlock()
@@ -414,20 +423,6 @@ func (rf *Raft) ticker() {
 }
 
 //
-//  领导者发送心跳
-//
-func (rf *Raft) SendHeartBreaker() {
-	req := rf.genAppendEntriesArgs()
-	reply := &AppendEntriesReply{}
-	for peer := range rf.peers {
-		if rf.me != peer {
-			DPrintf("%s sendheartBreak %+v", rf.LogPrefix(), req)
-			go rf.sendAppendEntries(peer, req, reply)
-		}
-	}
-}
-
-//
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
@@ -440,6 +435,7 @@ func (rf *Raft) SendHeartBreaker() {
 //
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
+
 	rf := &Raft{
 		peers:     peers,
 		persister: persister,
@@ -453,13 +449,15 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.voteFor = -1
 	rf.heartBreakTimer = time.NewTimer(heartBreakTimeout * timeoutUint)
 	rf.electionTimer = time.NewTimer(RandomElectionTimeout())
+	rf.matchIndex = make([]int, len(peers))
+	rf.nextIndex = make([]int, len(peers))
+	rf.replicateCond = make([]*sync.Cond, len(peers))
+	rf.applyCond = &sync.Cond{L: &sync.Mutex{}}
 
 	//2B
 	//开启n个同步日志routinue
 	for peer := range peers {
-		rf.matchIndex = append(rf.matchIndex, 0)
-		rf.nextIndex = append(rf.nextIndex, 0)
-		rf.replicateCond = append(rf.replicateCond, &sync.Cond{})
+		rf.replicateCond[peer] = &sync.Cond{L: &sync.Mutex{}}
 		go rf.Replicator(peer)
 	}
 
