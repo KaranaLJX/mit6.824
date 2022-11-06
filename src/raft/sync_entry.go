@@ -4,9 +4,6 @@ package raft
 //获取Index的位置
 //
 func (rf *Raft) GetPosByIndex(index int) int {
-	if len(rf.entry) == 0 {
-		return -1
-	}
 	firstIndex := rf.entry[0].Index
 	return index - firstIndex
 }
@@ -15,9 +12,6 @@ func (rf *Raft) GetPosByIndex(index int) int {
 //获取最后一个index
 //
 func (rf *Raft) GetLastIndex() int {
-	if len(rf.entry) == 0 {
-		return -1
-	}
 	return rf.entry[len(rf.entry)-1].Index
 }
 
@@ -38,13 +32,13 @@ func (rf *Raft) Replicator(peer int) {
 		// rf.mu.RLock()
 		// defer rf.mu.RUnlock()
 		//TODO: 这里如何加锁
-		for rf.status == Status_Leader && rf.matchIndex[peer] >= rf.commitIndex {
+		for rf.status == Status_Leader && rf.matchIndex[peer] < rf.GetLastIndex() {
 			//这里不应该go 出去，因为广播发送结束后才可能
-			DPrintf("[Replicator] %v | peer %v match %v commit %v", rf.LogPrefix(), peer, rf.matchIndex[peer], rf.commitIndex)
+			DPrintf("[Replicator] %v | peer %v match %v last %v", rf.LogPrefix(), peer, rf.matchIndex[peer], rf.GetLastIndex())
 
 			rf.SendOneBroadcast(peer)
 		}
-		rf.replicateCond[peer].L.Lock()
+		rf.replicateCond[peer].L.Unlock()
 	}
 }
 
@@ -95,6 +89,9 @@ func (rf *Raft) ApplyEntry() {
 func (rf *Raft) Broadcast(isHeartBreak bool) {
 	if !rf.killed() && rf.status == Status_Leader {
 		for peer := range rf.peers {
+			if peer == rf.me {
+				continue
+			}
 			if isHeartBreak {
 				go rf.SendOneBroadcast(peer)
 			} else {
@@ -142,28 +139,33 @@ type AppendEntriesReply struct {
 //发送一次广播,同步日志
 //
 func (rf *Raft) SendOneBroadcast(peer int) {
-	//
 	rf.mu.RLock()
 	req := rf.genAppendEntriesArgs()
 	req.PreLogIndex = rf.nextIndex[peer] - 1
-	pos := rf.GetPosByIndex(rf.nextIndex[peer] - 1)
+	pos := rf.GetPosByIndex(req.PreLogIndex)
 	if pos < 0 {
-		//leader太超前 TODO，发送snatshot
+		DPrintf("ERR[SendOneBroadcast]%s PreLog %v miss", rf.LogPrefix(), req.PreLogIndex)
 		rf.mu.RUnlock()
 		return
 	}
 	if pos >= len(rf.entry) {
 		//leader落后 TODO 怎么处理？
+
+		DPrintf("ERR[SendOneBroadcast]%s PreLog %v exceed %v", rf.LogPrefix(), pos, len(rf.entry))
 		rf.mu.RUnlock()
 		return
 	}
+
+	req.Entries = rf.entry[pos+1:]
 	req.PreLogTerm = rf.entry[pos].Term
-	req.Entries = rf.entry[pos:]
+
 	resp := &AppendEntriesReply{}
+	rf.mu.RUnlock()
 	if rf.sendAppendEntries(peer, req, resp) {
 		rf.mu.Lock()
-		defer rf.mu.Lock()
 		rf.HandleBroadCastResp(peer, req, resp)
+		rf.mu.Unlock()
+
 	}
 
 }
@@ -181,9 +183,11 @@ func (rf *Raft) HandleBroadCastResp(peer int, req *AppendEntriesArgs, resp *Appe
 	}
 	//处理成功
 	if resp.Success && resp.Term == rf.curTerm {
-		rf.matchIndex[peer] = req.PreLogIndex + len(req.Entries)
-		rf.nextIndex[peer] = rf.matchIndex[peer] + 1
-		rf.AddCommitIndex()
+		if len(req.Entries) > 0 {
+			rf.matchIndex[peer] = req.PreLogIndex + len(req.Entries)
+			rf.nextIndex[peer] = rf.matchIndex[peer] + 1
+			rf.AddCommitIndex()
+		}
 		return
 	}
 	//处理冲突,回退nextIndex
@@ -210,7 +214,7 @@ func (rf *Raft) HandleBroadCastResp(peer int, req *AppendEntriesArgs, resp *Appe
 //检查过半投票，并且步进commitIndex
 //
 func (rf *Raft) AddCommitIndex() {
-	for i := len(rf.entry) - 1; i >= 0; i++ {
+	for i := len(rf.entry) - 1; i >= 0; i-- {
 		index := rf.entry[i].Index
 		votes := 1
 		for peer := range rf.peers {
@@ -287,6 +291,12 @@ func (rf *Raft) SyncEntry(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 				break
 			}
 		}
+		return
+	}
+
+	//
+	if len(args.Entries) == 0 {
+		reply.Success = true
 		return
 	}
 

@@ -207,16 +207,16 @@ type RequestVoteReply struct {
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	DPrintf("%s receive vote from %+v", rf.LogPrefix(), *args)
+	//DPrintf("%s receive vote from %+v", rf.LogPrefix(), *args)
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if args.Term < rf.curTerm || (args.Term == rf.curTerm && rf.voteFor != -1 && rf.voteFor != args.CandidateId) {
-		DPrintf("%s reject vote %+v", rf.LogPrefix(), *args)
+		//DPrintf("%s reject vote %+v", rf.LogPrefix(), *args)
 		reply.Term, reply.VoteGranted = rf.curTerm, false
 		return
 	}
-	DPrintf("%s agree vote %+v", rf.LogPrefix(), *args)
+	//DPrintf("%s agree vote %+v", rf.LogPrefix(), *args)
 
 	// if args.Term  > rf.curTerm {
 	rf.status = Status_Follower
@@ -341,7 +341,7 @@ func (rf *Raft) killed() bool {
 //
 func (rf *Raft) StartElection() {
 	//rf.mu.Lock()不能在主协程加锁，cuz外部有锁
-	DPrintf("%s start election", rf.LogPrefix())
+	//DPrintf("%s start election", rf.LogPrefix())
 	rf.voteFor = rf.me
 	grantCnt := 1
 	req := rf.genRequestVoteArgs()
@@ -360,13 +360,14 @@ func (rf *Raft) StartElection() {
 				defer rf.mu.Unlock()
 				if rf.curTerm == resp.Term && rf.status == Status_Candidate {
 					if resp.VoteGranted {
-						DPrintf("%s recevice agree from %v  reply %+v", rf.LogPrefix(), peer, *resp)
+						//DPrintf("%s recevice agree from %v  reply %+v", rf.LogPrefix(), peer, *resp)
 
 						grantCnt++
 						if grantCnt > len(rf.peers)/2 {
 							rf.status = Status_Leader
 							//TODO: 发送广播
 							rf.Broadcast(true)
+							DPrintf("[election] %s become leader", rf.LogPrefix())
 
 						}
 					}
@@ -393,12 +394,9 @@ func (rf *Raft) ticker() {
 		//2A
 		case <-rf.heartBreakTimer.C:
 			{
-				if rf.curTerm > 1 {
-					DPrintf("%s heartbreak timeout", rf.LogPrefix())
-				}
 				rf.mu.Lock()
 				if rf.status == Status_Leader {
-					DPrintf("%s leader heartbreak timeout", rf.LogPrefix())
+					//DPrintf("%s leader heartbreak timeout", rf.LogPrefix())
 					rf.electionTimer.Reset(RandomElectionTimeout())
 					rf.Broadcast(true)
 				}
@@ -410,7 +408,7 @@ func (rf *Raft) ticker() {
 
 				//转换状态 term+1 异步开启选举 重置timeout
 				rf.mu.Lock()
-				DPrintf("%s election timeout", rf.LogPrefix())
+				//DPrintf("%s election timeout", rf.LogPrefix())
 				rf.status = Status_Candidate
 				rf.curTerm = rf.curTerm + 1
 				rf.StartElection()
@@ -453,16 +451,18 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.nextIndex = make([]int, len(peers))
 	rf.replicateCond = make([]*sync.Cond, len(peers))
 	rf.applyCond = &sync.Cond{L: &sync.Mutex{}}
+	rf.entry = []*Entry{{0, 0, nil}} //第一条填充
 
 	//2B
 	//开启n个同步日志routinue
 	for peer := range peers {
+		rf.nextIndex[peer] = rf.GetLastIndex() + 1
 		rf.replicateCond[peer] = &sync.Cond{L: &sync.Mutex{}}
 		go rf.Replicator(peer)
 	}
 
 	//开启提交日志协程
-	go rf.ApplyEntry()
+	//go rf.ApplyEntry()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
