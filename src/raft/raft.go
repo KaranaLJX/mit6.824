@@ -44,7 +44,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
-
+	CommandTerm  int
 	// For 2D:
 	SnapshotValid bool
 	Snapshot      []byte
@@ -439,6 +439,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		persister: persister,
 		me:        me,
 		dead:      0,
+		applyCh:   applyCh,
 		mu:        sync.RWMutex{},
 	}
 
@@ -457,12 +458,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	//开启n个同步日志routinue
 	for peer := range peers {
 		rf.nextIndex[peer] = rf.GetLastIndex() + 1
-		rf.replicateCond[peer] = &sync.Cond{L: &sync.Mutex{}}
-		go rf.Replicator(peer)
+		if peer != rf.me {
+			rf.replicateCond[peer] = &sync.Cond{L: &sync.Mutex{}}
+			go rf.Replicator(peer)
+		}
 	}
 
 	//开启提交日志协程
-	//go rf.ApplyEntry()
+	go rf.ApplyEntry()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())

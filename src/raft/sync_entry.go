@@ -19,68 +19,69 @@ func (rf *Raft) GetLastIndex() int {
 //  复制协程
 //
 func (rf *Raft) Replicator(peer int) {
+	//为什么是在外层加条件锁
+	rf.replicateCond[peer].L.Lock()
+	defer rf.replicateCond[peer].L.Unlock()
 	for !rf.killed() {
-		rf.replicateCond[peer].L.Lock()
-		rf.mu.RLock()
-		if !(rf.status == Status_Leader && rf.matchIndex[peer] >= rf.GetLastIndex()) {
-			rf.mu.RUnlock()
+		if !rf.needReplicate(peer) {
 			DPrintf("[Replicator] %v | peer %v do not need to Replicate", rf.LogPrefix(), peer)
 			rf.replicateCond[peer].Wait()
 		}
-		rf.mu.RLock()
-
-		// rf.mu.RLock()
-		// defer rf.mu.RUnlock()
-		//TODO: 这里如何加锁
-		for rf.status == Status_Leader && rf.matchIndex[peer] < rf.GetLastIndex() {
-			//这里不应该go 出去，因为广播发送结束后才可能
-			DPrintf("[Replicator] %v | peer %v match %v last %v", rf.LogPrefix(), peer, rf.matchIndex[peer], rf.GetLastIndex())
-
-			rf.SendOneBroadcast(peer)
-		}
-		rf.replicateCond[peer].L.Unlock()
+		//这里不应该go 出去，因为广播发送结束后才可能
+		DPrintf("[Replicator] %v | peer %v match %v last %v", rf.LogPrefix(), peer, rf.matchIndex[peer], rf.GetLastIndex())
+		rf.SendOneBroadcast(peer)
 	}
+}
+
+//
+//判断peer是否需要同步日志 为了defer释放锁，单独起一个func
+//
+func (rf *Raft) needReplicate(peer int) bool {
+	//如果
+	rf.mu.RLock()
+	defer rf.mu.RUnlock()
+	return rf.status == Status_Leader && rf.matchIndex[peer] < rf.GetLastIndex()
 }
 
 //
 //提交日志协程
 //
 func (rf *Raft) ApplyEntry() {
+	rf.applyCond.L.Lock()
+	defer rf.applyCond.L.Unlock()
 	for !rf.killed() {
-		rf.applyCond.L.Lock()
-		//TODO: for or if
-		rf.mu.RLock()
-		if rf.commitIndex <= rf.applIndex {
-			rf.mu.RUnlock()
+		if !rf.needApply() {
 			DPrintf("[ApplyEntry] %v |  no need to apply", rf.LogPrefix())
 			rf.applyCond.Wait()
 		}
+		DPrintf("[ApplyEntry] %v | apply %v commit %v", rf.LogPrefix(), rf.applIndex, rf.commitIndex)
+		entryToApply := make([]*Entry, rf.commitIndex-rf.applIndex)
+		rf.mu.RLock()
+		r := rf.GetPosByIndex(rf.commitIndex)
+		l := rf.GetPosByIndex(rf.applIndex) + 1
+		copy(entryToApply, rf.entry[l:r+1])
 		rf.mu.RUnlock()
-
-		// rf.mu.RLock()
-		// defer rf.mu.RUnlock()
-		//TODO: 这里如何加锁
-		for rf.applIndex < rf.commitIndex {
-			DPrintf("[ApplyEntry] %v | apply %v commit %v", rf.LogPrefix(), rf.applIndex, rf.commitIndex)
-			var entryToApply []*Entry
-			rf.mu.RLock()
-			entryToApply = rf.entry[rf.GetPosByIndex(rf.applIndex):]
-			rf.mu.RLock()
-			//这一块耗时很高，需要并发???
-			for _, e := range entryToApply {
-				rf.applyCh <- ApplyMsg{
-					CommandValid: true,
-					CommandIndex: e.Index,
-					Command:      e.Command,
-				}
+		//这一块耗时很高，需要并发???
+		for _, e := range entryToApply {
+			rf.applyCh <- ApplyMsg{
+				CommandValid: true,
+				CommandIndex: e.Index,
+				Command:      e.Command,
+				CommandTerm:  e.Term,
 			}
-			rf.mu.Lock()
-			rf.applIndex = rf.commitIndex
-			rf.mu.Unlock()
 		}
-		rf.applyCond.L.Unlock()
+		rf.mu.Lock()
+		rf.applIndex = rf.commitIndex
+		rf.mu.Unlock()
 	}
 
+}
+
+//
+//是否需要同步
+//
+func (rf *Raft) needApply() bool {
+	return rf.commitIndex < rf.applIndex
 }
 
 //
@@ -176,6 +177,8 @@ func (rf *Raft) SendOneBroadcast(peer int) {
 func (rf *Raft) HandleBroadCastResp(peer int, req *AppendEntriesArgs, resp *AppendEntriesReply) {
 	//成为候选人
 	if resp.Term > rf.curTerm {
+		DPrintf("%v [HandleBroadCastResp]|[%v]  less term,resp %+v", rf.LogPrefix(), peer, *resp)
+
 		rf.status = Status_Candidate
 		rf.voteFor = -1
 		rf.curTerm = resp.Term
@@ -184,6 +187,7 @@ func (rf *Raft) HandleBroadCastResp(peer int, req *AppendEntriesArgs, resp *Appe
 	//处理成功
 	if resp.Success && resp.Term == rf.curTerm {
 		if len(req.Entries) > 0 {
+			DPrintf("%v [HandleBroadCastResp]|[%v]  success sync %+v", rf.LogPrefix(), peer, *req)
 			rf.matchIndex[peer] = req.PreLogIndex + len(req.Entries)
 			rf.nextIndex[peer] = rf.matchIndex[peer] + 1
 			rf.AddCommitIndex()
@@ -192,6 +196,7 @@ func (rf *Raft) HandleBroadCastResp(peer int, req *AppendEntriesArgs, resp *Appe
 	}
 	//处理冲突,回退nextIndex
 	if resp.Term == rf.curTerm {
+		DPrintf("%v [HandleBroadCastResp]|[%v]  conflict req %+v resp %+v", rf.LogPrefix(), peer, *req, *resp)
 		cPos := rf.GetPosByIndex(resp.ConflitIndex)
 		if resp.ConflitTerm != -1 {
 			//找到最后一个term跟冲突term相同的pos
@@ -232,6 +237,9 @@ func (rf *Raft) AddCommitIndex() {
 			rf.commitIndex = index
 			break
 		}
+	}
+	if rf.commitIndex > rf.applIndex {
+		rf.applyCond.Signal()
 	}
 }
 
@@ -278,11 +286,13 @@ func (rf *Raft) SyncEntry(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	pos := rf.GetPosByIndex(args.PreLogTerm)
 	//prelog找不到 TODO:how to handle
 	if pos < 0 || pos >= len(rf.entry) {
+		DPrintf("[SyncEntry] %v| preLogTerm not found req %+v", rf.LogPrefix(), *args)
 		reply.ConflitTerm = 0
 		return
 	}
 	//不match
 	if rf.entry[pos].Term != args.PreLogTerm {
+		DPrintf("[SyncEntry] %v| req %+v preLogTerm %+v conflit %+v", rf.LogPrefix(), *args, rf.entry[pos].Term, args.PreLogTerm)
 		reply.ConflitIndex = args.PreLogIndex
 		reply.ConflitTerm = rf.entry[pos].Term
 		for i := 0; i < len(rf.entry); i++ {
@@ -294,32 +304,28 @@ func (rf *Raft) SyncEntry(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 		return
 	}
 
-	//
-	if len(args.Entries) == 0 {
-		reply.Success = true
-		return
+	if len(args.Entries) > 0 {
+		//没有任何日志匹配
+		lPos := rf.GetPosByIndex(args.Entries[0].Index)
+		rPos := rf.GetPosByIndex(args.Entries[len(args.Entries)-1].Index)
+		//如有不同，全部替换
+		curPos := lPos
+		for ; curPos <= rPos && curPos < len(rf.entry); curPos++ {
+			if rf.entry[curPos].Term != args.Entries[curPos-lPos].Term {
+				break
+			}
+		}
+		if curPos <= rPos {
+			rf.entry = append(rf.entry[:curPos], args.Entries[curPos-lPos:]...)
+		}
+		DPrintf("[SyncEntry] %v|success sync req %+v ", rf.LogPrefix(), *args)
 	}
 
-	//没有任何日志匹配
-	lPos := rf.GetPosByIndex(args.Entries[0].Index)
-	rPos := rf.GetPosByIndex(args.Entries[len(args.Entries)-1].Index)
-	if lPos > len(rf.entry) {
-		reply.ConflitTerm = rf.entry[pos].Term
-		reply.ConflitIndex = args.PreLogIndex + 1
-	}
-	//如有不同，全部替换
-	curPos := lPos
-	for ; curPos <= rPos && curPos < len(rf.entry); curPos++ {
-		if rf.entry[curPos].Term != args.Entries[curPos-lPos].Term {
-			break
-		}
-	}
-	if curPos <= rPos {
-		rf.entry = append(rf.entry[:curPos], args.Entries[curPos-lPos:]...)
-	}
 	reply.Success = true
 	rf.commitIndex = args.LeaderComimit
-	rf.applyCond.Signal()
+	if rf.commitIndex > rf.applIndex {
+		rf.applyCond.Signal()
+	}
 }
 
 //
