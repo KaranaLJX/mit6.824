@@ -6,7 +6,7 @@ import (
 )
 
 // Debugging
-const Debug = true
+const Debug = false
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -15,8 +15,5 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 func (rf *Raft) LogPrefix() string {
-
-	// Your code here (2D).
-
 	return fmt.Sprintf("[%v]|[t%v]|[L%v]|[c%v][a%v]", rf.me, rf.curTerm, rf.status == Status_Leader, rf.commitIndex, rf.applIndex)
 }
