@@ -39,6 +39,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 	if args.Term < rf.curTerm || (args.Term == rf.curTerm && rf.voteFor != -1 && rf.voteFor != args.CandidateId) {
 		//DPrintf("%s reject vote %+v", rf.LogPrefix(), *args)
 		reply.Term, reply.VoteGranted = rf.curTerm, false

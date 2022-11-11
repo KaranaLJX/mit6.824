@@ -107,6 +107,7 @@ func (rf *Raft) SendOneBroadcast(peer int) {
 //
 func (rf *Raft) HandleBroadCastResp(peer int, req *AppendEntriesArgs, resp *AppendEntriesReply) {
 	//成为候选人
+	defer rf.persist()
 	if resp.Term > rf.curTerm {
 		DPrintf("%v [HandleBroadCastResp]|[%v]  less term,resp %+v", rf.LogPrefix(), peer, *resp)
 
@@ -184,6 +185,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 	//term 太小，不接受心跳
 	if args.Term < rf.curTerm {
 		DPrintf("%s leader term [%+v] less than curterm",
@@ -214,6 +216,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 //peer日志同步leader日志
 //
 func (rf *Raft) SyncEntry(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	defer rf.persist()
 	pos := rf.GetPosByIndex(args.PreLogTerm)
 	//prelog找不到 TODO:how to handle
 	if pos < 0 || pos >= len(rf.entry) {

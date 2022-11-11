@@ -20,12 +20,15 @@ package raft
 import (
 	//	"bytes"
 
+	"bytes"
+	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	//	"6.824/labgob"
+	"6.824/labgob"
 	"6.824/labrpc"
 )
 
@@ -122,14 +125,16 @@ func (rf *Raft) GetState() (int, bool) {
 //
 func (rf *Raft) persist() {
 
-	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	//Your code here (2C).
+	//Example:
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.curTerm)
+	e.Encode(rf.voteFor)
+	e.Encode(rf.entry)
+	data := w.Bytes()
+	DPrintf("[persist] %v", rf.LogPrefix())
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -141,17 +146,21 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	// Your code here (2C).
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var term int
+	var voteFor int
+	var entries []*Entry
+	if d.Decode(&term) != nil ||
+		d.Decode(&voteFor) != nil || d.Decode(&entries) != nil {
+		fmt.Printf("%v decode err", rf.LogPrefix())
+		return
+	} else {
+		DPrintf("[readPersist]%v get %v %v %v", rf.LogPrefix(), term, voteFor, len(entries))
+		rf.curTerm = term
+		rf.voteFor = voteFor
+		rf.entry = entries
+	}
 }
 
 //
@@ -213,6 +222,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	term = rf.curTerm
 	rf.entry = append(rf.entry, &Entry{index, term, command})
+	rf.persist()
 	DPrintf("[Start] %s receive command index %v", rf.LogPrefix(), index)
 	go rf.Broadcast(false)
 	return index, term, true
@@ -254,6 +264,7 @@ func (rf *Raft) StartElection() {
 	rf.voteFor = rf.me
 	grantCnt := 1
 	req := rf.genRequestVoteArgs()
+	defer rf.persist()
 	for peer := range rf.peers {
 
 		if peer == rf.me {
@@ -261,7 +272,7 @@ func (rf *Raft) StartElection() {
 		}
 		go func(peer int) {
 			//异步请求投票，可以加锁
-
+			defer rf.persist()
 			resp := new(RequestVoteReply)
 			if rf.sendRequestVote(peer, req, resp) {
 				//当且仅当发送请求成功后才加锁，不然发送失败后，会阻塞锁
@@ -284,6 +295,7 @@ func (rf *Raft) StartElection() {
 						rf.status = Status_Follower
 						rf.curTerm = resp.Term
 						rf.voteFor = -1
+						rf.persist()
 					}
 				}
 			}
@@ -325,21 +337,19 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCond = &sync.Cond{L: &rf.mu}
 	rf.entry = []*Entry{{0, 0, nil}} //第一条填充
 
+	// initialize from state persisted before a crash
+	rf.readPersist(persister.ReadRaftState())
+
 	//2B
 	//开启n个同步日志routinue
 	for peer := range peers {
-		rf.nextIndex[peer] = rf.GetLastIndex() + 1
+		rf.nextIndex[peer] = 1
 		if peer != rf.me {
 			rf.replicateCond[peer] = &sync.Cond{L: &sync.Mutex{}}
 			go rf.Replicator(peer)
 		}
 	}
-
-	//开启提交日志协程
 	go rf.ApplyEntry()
-
-	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
