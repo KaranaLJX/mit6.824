@@ -327,6 +327,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+
+	//为什么可以直接将第一条命令设置为applIndex
+	//如果没有经过snapshot，那么首条命令是空命令，可以直接设置
+	//如果已经经过snapshot，首条命令是已经被提交的，见论文// the service says it has created a snapshot that has
+	// all info up to and including index.
 	rf.applIndex = rf.entry[0].Index // 由于snapshot aplliedIndex也需要设置为第一条记录
 
 	//2B
