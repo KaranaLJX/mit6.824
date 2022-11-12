@@ -10,8 +10,9 @@ func (rf *Raft) ApplyEntry() {
 			DPrintf("[ApplyEntry] %v |  no need to apply", rf.LogPrefix())
 			rf.applyCond.Wait()
 		}
-		DPrintf("[ApplyEntry] %v | apply %v commit %v", rf.LogPrefix(), rf.applIndex, rf.commitIndex)
+		DPrintf("[ApplyEntry] %v | log %v", rf.LogPrefix(), rf.logState())
 		entryToApply := make([]*Entry, rf.commitIndex-rf.applIndex)
+		cIndex := rf.commitIndex
 		r := rf.GetPosByIndex(rf.commitIndex)
 		l := rf.GetPosByIndex(rf.applIndex) + 1
 		copy(entryToApply, rf.entry[l:r+1])
@@ -26,8 +27,15 @@ func (rf *Raft) ApplyEntry() {
 			}
 		}
 		rf.mu.Lock()
-		rf.applIndex = rf.commitIndex
+		rf.applIndex = max(rf.applIndex, cIndex)
 		rf.mu.Unlock()
 	}
 
+}
+
+func max(i, j int) int {
+	if i > j {
+		return i
+	}
+	return j
 }

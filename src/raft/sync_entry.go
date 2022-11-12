@@ -76,13 +76,19 @@ func (rf *Raft) SendOneBroadcast(peer int) {
 	req.PreLogIndex = rf.nextIndex[peer] - 1
 	pos := rf.GetPosByIndex(req.PreLogIndex)
 	if pos < 0 {
-		DPrintf("ERR[SendOneBroadcast]%s PreLog %v miss", rf.LogPrefix(), req.PreLogIndex)
+		DPrintf("[SendOneBroadcast]%s PreLog %v miss need snapshot", rf.LogPrefix(), req.PreLogIndex)
+		sReq := rf.genInstallSnapshotArgs()
+		sReply := &InstallSnapshotReply{}
 		rf.mu.RUnlock()
+		if rf.sendInstallSnapshot(peer, sReq, sReply) {
+			rf.mu.Lock()
+			rf.HandleInstallSnapshotResp(peer, sReq, sReply)
+			rf.mu.Unlock()
+		}
 		return
 	}
 	if pos >= len(rf.entry) {
 		//leader落后 TODO 怎么处理？
-
 		DPrintf("ERR[SendOneBroadcast]%s PreLog %v exceed %v", rf.LogPrefix(), pos, len(rf.entry))
 		rf.mu.RUnlock()
 		return
@@ -217,11 +223,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 //
 func (rf *Raft) SyncEntry(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	defer rf.persist()
-	pos := rf.GetPosByIndex(args.PreLogTerm)
+	pos := rf.GetPosByIndex(args.PreLogIndex)
 	//prelog找不到 TODO:how to handle
-	if pos < 0 || pos >= len(rf.entry) {
-		DPrintf("[SyncEntry] %v| preLogTerm not found req %+v", rf.LogPrefix(), *args)
+	if pos < 0 {
+		DPrintf("[SyncEntry] %v| PreLogIndex not found req %+v curlog %+v", rf.LogPrefix(), *args, *rf.entry[0])
 		reply.ConflitTerm = 0
+		reply.ConflitIndex = 0
+		return
+	}
+	if pos >= len(rf.entry) {
+		DPrintf("[SyncEntry] %v| PreLogIndex not found req %+v curlog %+v", rf.LogPrefix(), *args, *rf.entry[len(rf.entry)-1])
+		reply.ConflitTerm = -1
+		reply.ConflitIndex = rf.GetLastIndex() + 1
 		return
 	}
 	//不match

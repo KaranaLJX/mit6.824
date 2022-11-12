@@ -306,7 +306,7 @@ func TestFailAgree2B(t *testing.T) {
 	leader := cfg.checkOneLeader()
 	peer := (leader + 1) % servers
 	cfg.disconnect((leader + 1) % servers)
-	fmt.Printf("TestFailAgree2B disconnect peer %v\n", peer)
+	DPrintf("TestFailAgree2B disconnect peer %v\n", peer)
 
 	// the leader and remaining follower should be
 	// able to agree despite the disconnected follower.
@@ -318,7 +318,7 @@ func TestFailAgree2B(t *testing.T) {
 
 	// re-connect
 	cfg.connect((leader + 1) % servers)
-	fmt.Printf("TestFailAgree2B connect peer %v\n", peer)
+	DPrintf("TestFailAgree2B connect peer %v\n", peer)
 
 	// the full set of servers should preserve
 	// previous agreements, and be able to agree
@@ -494,7 +494,7 @@ func TestRejoin2B(t *testing.T) {
 	// leader network failure
 	leader1 := cfg.checkOneLeader()
 	cfg.disconnect(leader1)
-	fmt.Printf("TestRejoin2B disconnect leader1 %v", leader1)
+	DPrintf("TestRejoin2B disconnect leader1 %v", leader1)
 
 	// make old leader try to agree on some entries
 	cfg.rafts[leader1].Start(102)
@@ -506,20 +506,20 @@ func TestRejoin2B(t *testing.T) {
 
 	// new leader network failure
 	leader2 := cfg.checkOneLeader()
-	fmt.Printf("TestRejoin2B get leader2 %v", leader2)
+	DPrintf("TestRejoin2B get leader2 %v", leader2)
 
 	cfg.disconnect(leader2)
-	fmt.Printf("TestRejoin2B disconnect leader2 %v", leader2)
+	DPrintf("TestRejoin2B disconnect leader2 %v", leader2)
 
 	// old leader connected again
 	cfg.connect(leader1)
-	fmt.Printf("TestRejoin2B connect leader1 %v", leader1)
+	DPrintf("TestRejoin2B connect leader1 %v", leader1)
 
 	cfg.one(104, 2, true)
 
 	// all together now
 	cfg.connect(leader2)
-	fmt.Printf("TestRejoin2B connect leader2 %v", leader2)
+	DPrintf("TestRejoin2B connect leader2 %v", leader2)
 
 	cfg.one(105, servers, true)
 

@@ -119,6 +119,18 @@ func (rf *Raft) GetState() (int, bool) {
 }
 
 //
+//
+//
+func (rf *Raft) encodeState() []byte {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.curTerm)
+	e.Encode(rf.voteFor)
+	e.Encode(rf.entry)
+	return w.Bytes()
+}
+
+//
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
@@ -127,12 +139,8 @@ func (rf *Raft) persist() {
 
 	//Your code here (2C).
 	//Example:
-	w := new(bytes.Buffer)
-	e := labgob.NewEncoder(w)
-	e.Encode(rf.curTerm)
-	e.Encode(rf.voteFor)
-	e.Encode(rf.entry)
-	data := w.Bytes()
+
+	data := rf.encodeState()
 	DPrintf("[persist] %v", rf.LogPrefix())
 	rf.persister.SaveRaftState(data)
 }
@@ -161,26 +169,6 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.voteFor = voteFor
 		rf.entry = entries
 	}
-}
-
-//
-// A service wants to switch to snapshot.  Only do so if Raft hasn't
-// have more recent info since it communicate the snapshot on applyCh.
-//
-func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
-
-	// Your code here (2D).
-
-	return true
-}
-
-// the service says it has created a snapshot that has
-// all info up to and including index. this means the
-// service no longer needs the log through (and including)
-// that index. Raft should now trim its log as much as possible.
-func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	// Your code here (2D).
-
 }
 
 //
@@ -339,6 +327,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	rf.applIndex = rf.entry[0].Index // 由于snapshot aplliedIndex也需要设置为第一条记录
 
 	//2B
 	//开启n个同步日志routinue
