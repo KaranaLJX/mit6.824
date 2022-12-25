@@ -3,7 +3,6 @@ package kvraft
 import (
 	"crypto/rand"
 	"math/big"
-	"sync"
 
 	"6.824/labrpc"
 	"6.824/raft"
@@ -14,7 +13,6 @@ type Clerk struct {
 	leaderID  int
 	clientID  int64
 	commandID int64
-	mu        sync.Mutex
 	// You will have to modify this struct.
 }
 
@@ -48,15 +46,12 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
-	leaderId := 0
-	ck.mu.Lock()
-	leaderId = ck.leaderID
-	ck.mu.Unlock()
+
 	args := &GetArgs{Key: key}
 	reply := &GetReply{}
 	//TODO: which server to call
 	for {
-		ok := ck.servers[leaderId].Call("KVServer.Get", &args, &reply)
+		ok := ck.servers[ck.leaderID].Call("KVServer.Get", &args, &reply)
 		if !ok {
 			raft.DPrintf("call server GET system err")
 			continue
@@ -65,17 +60,14 @@ func (ck *Clerk) Get(key string) string {
 			raft.DPrintf("call server GET err: %v", reply.Err)
 			if reply.Err == ErrWrongLeader {
 				if reply.LeaderID < len(ck.servers) {
-					leaderId = reply.LeaderID
+					ck.leaderID = reply.LeaderID
 				} else {
-					leaderId = (leaderId + 1) % len(ck.servers)
+					ck.leaderID = (ck.leaderID + 1) % len(ck.servers)
 				}
 
 			}
 			continue
 		}
-		ck.mu.Lock()
-		ck.leaderID = leaderId
-		ck.mu.Unlock()
 		return reply.Value
 	}
 
@@ -93,17 +85,12 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
-	leaderId, commandID := 0, int64(0)
-	ck.mu.Lock()
-	leaderId = ck.leaderID
 	ck.commandID++
-	commandID = ck.commandID
-	ck.mu.Unlock()
-	args := &PutAppendArgs{Key: key, Value: value, Op: op, ClientID: ck.clientID, CommandID: commandID}
+	args := &PutAppendArgs{Key: key, Value: value, Op: op, ClientID: ck.clientID, CommandID: ck.commandID}
 	reply := &PutAppendReply{}
 	//TODO: which server to call
 	for {
-		ok := ck.servers[leaderId].Call("KVServer.PutAppend", &args, &reply)
+		ok := ck.servers[ck.leaderID].Call("KVServer.PutAppend", &args, &reply)
 		if !ok {
 			raft.DPrintf("call server PutAppend system err")
 			continue
@@ -112,17 +99,14 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			raft.DPrintf("call server PutAppend err: %v", reply.Err)
 			if reply.Err == ErrWrongLeader {
 				if reply.LeaderID < len(ck.servers) {
-					leaderId = reply.LeaderID
+					ck.leaderID = reply.LeaderID
 				} else {
-					leaderId = (leaderId + 1) % len(ck.servers)
+					ck.leaderID = (ck.leaderID + 1) % len(ck.servers)
 				}
 
 			}
 			continue
 		}
-		ck.mu.Lock()
-		ck.leaderID = leaderId
-		ck.mu.Unlock()
 		return
 	}
 }
