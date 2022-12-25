@@ -4,6 +4,7 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"6.824/labgob"
 	"6.824/labrpc"
@@ -11,6 +12,7 @@ import (
 )
 
 const Debug = false
+const ReqTimeout = 3 * time.Second
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -24,28 +26,72 @@ type Op struct {
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
 }
+type Command struct {
+	ClientID  int64
+	CommandID int64
+	Op        string
+	Key       string
+	Value     string
+}
+
+type CommandReply struct {
+	CommandID int64
+	Value     string
+	Err       Err
+}
 
 type KVServer struct {
-	mu      sync.Mutex
-	me      int
-	rf      *raft.Raft
-	applyCh chan raft.ApplyMsg
-	dead    int32 // set by Kill()
-
-	maxraftstate int // snapshot if log grows this big
-
+	mu           sync.Mutex
+	me           int
+	rf           *raft.Raft
+	applyCh      chan raft.ApplyMsg
+	dead         int32 // set by Kill()
+	maxraftstate int   // snapshot if log grows this big
+	//TODO: 如果客户端的commandID比当前的id小，怎么取
+	lastReply  map[int64]CommandReply
+	notifyChan map[int]chan CommandReply
+	st         *store
 	// Your definitions here.
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
+	c := Command{Op: OpGet, Key: args.Key}
+	index, _, isLeader := kv.rf.Start(c)
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+	select {
+	case r := <-kv.notifyChan[index]:
+		reply.Value = r.Value
+		reply.Err = r.Err
+	case <-time.After(ReqTimeout):
+		reply.Err = ErrTimeout
+
+	}
 	// Your code here.
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
+	kv.mu.Lock()
+	if kv.lastReply[args.ClientID].CommandID == args.CommandID {
+		DPrintf("client %v command %v dup", args.ClientID, args.CommandID)
+		reply.Err = kv.lastReply[args.ClientID].Err
+		return
+	}
+	kv.mu.Unlock()
 	// Your code here.
-	if _, isLeader := kv.rf.GetState(); !isLeader {
+	c := Command{ClientID: args.ClientID, CommandID: args.CommandID, Op: args.Op}
+	index, _, isLeader := kv.rf.Start(c)
+	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
+	}
+	select {
+	case r := <-kv.notifyChan[index]:
+		reply.Err = r.Err
+	case <-time.After(ReqTimeout):
+		reply.Err = ErrTimeout
 	}
 }
 
@@ -68,6 +114,51 @@ func (kv *KVServer) Kill() {
 func (kv *KVServer) killed() bool {
 	z := atomic.LoadInt32(&kv.dead)
 	return z == 1
+}
+
+func (kv *KVServer) isDup(clientID, commandID int64) bool {
+	return kv.lastReply[clientID].CommandID == clientID
+}
+
+func (kv *KVServer) applier() {
+	for !kv.killed() {
+
+		msg := <-kv.applyCh
+		r := CommandReply{}
+		if msg.CommandValid {
+			c := msg.Command.(Command)
+			if c.Op == OpGet {
+				v, ok := kv.st.Get(c.Key)
+				if !ok {
+					r.Err = ErrNoKey
+				} else {
+					r.Value = v
+				}
+			} else {
+				kv.mu.Lock()
+				dup := kv.isDup(c.ClientID, c.CommandID)
+				kv.mu.Unlock()
+				if dup {
+					DPrintf("client %v command %v already apply", c.ClientID, c.CommandID)
+					r.Err = kv.lastReply[c.ClientID].Err
+				} else {
+					if c.Op == OpAppend {
+						ok := kv.st.Append(c.Key, c.Value)
+						if !ok {
+							r.Err = ErrNoKey
+						}
+					} else {
+						kv.st.Put(c.Key, c.Value)
+					}
+				}
+			}
+			ch := kv.notifyChan[msg.CommandIndex]
+			ch <- r
+		} else {
+			DPrintf("command %+v invalid", msg)
+		}
+
+	}
 }
 
 //
@@ -97,8 +188,11 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-
+	kv.lastReply = map[int64]CommandReply{}
+	kv.notifyChan = make(map[int]chan CommandReply)
+	kv.st = &store{}
 	// You may need initialization code here.
+	go kv.applier()
 
 	return kv
 }
