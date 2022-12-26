@@ -54,6 +54,12 @@ type KVServer struct {
 	// Your definitions here.
 }
 
+func (kv *KVServer) GetNotifyCh(CommandIndex int) chan CommandReply {
+	kv.mu.Lock()
+	ch := kv.notifyChan[CommandIndex]
+	kv.mu.Unlock()
+	return ch
+}
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	c := Command{Op: OpGet, Key: args.Key}
 	index, _, isLeader := kv.rf.Start(c)
@@ -61,8 +67,9 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		reply.Err = ErrWrongLeader
 		return
 	}
+	ch := kv.GetNotifyCh(index)
 	select {
-	case r := <-kv.notifyChan[index]:
+	case r := <-ch:
 		reply.Value = r.Value
 		reply.Err = r.Err
 	case <-time.After(ReqTimeout):
@@ -73,13 +80,14 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	kv.mu.Lock()
-	if kv.lastReply[args.ClientID].CommandID == args.CommandID {
+
+	if kv.isDup(args.ClientID, args.CommandID) {
+		kv.mu.Lock()
 		DPrintf("client %v command %v dup", args.ClientID, args.CommandID)
 		reply.Err = kv.lastReply[args.ClientID].Err
+		kv.mu.Unlock()
 		return
 	}
-	kv.mu.Unlock()
 	// Your code here.
 	c := Command{ClientID: args.ClientID, CommandID: args.CommandID, Op: args.Op}
 	index, _, isLeader := kv.rf.Start(c)
@@ -87,8 +95,9 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		reply.Err = ErrWrongLeader
 		return
 	}
+	ch := kv.GetNotifyCh(index)
 	select {
-	case r := <-kv.notifyChan[index]:
+	case r := <-ch:
 		reply.Err = r.Err
 	case <-time.After(ReqTimeout):
 		reply.Err = ErrTimeout
@@ -117,7 +126,10 @@ func (kv *KVServer) killed() bool {
 }
 
 func (kv *KVServer) isDup(clientID, commandID int64) bool {
-	return kv.lastReply[clientID].CommandID == clientID
+	kv.mu.Lock()
+	dup := kv.lastReply[clientID].CommandID == clientID
+	kv.mu.Unlock()
+	return dup
 }
 
 func (kv *KVServer) applier() {
@@ -135,10 +147,7 @@ func (kv *KVServer) applier() {
 					r.Value = v
 				}
 			} else {
-				kv.mu.Lock()
-				dup := kv.isDup(c.ClientID, c.CommandID)
-				kv.mu.Unlock()
-				if dup {
+				if kv.isDup(c.ClientID, c.CommandID) {
 					DPrintf("client %v command %v already apply", c.ClientID, c.CommandID)
 					r.Err = kv.lastReply[c.ClientID].Err
 				} else {
@@ -152,6 +161,8 @@ func (kv *KVServer) applier() {
 					}
 				}
 			}
+			kv.mu.Lock()
+			kv.lastReply[args.clientID]=kv.
 			ch := kv.notifyChan[msg.CommandIndex]
 			ch <- r
 		} else {
