@@ -19,6 +19,7 @@ func (rf *Raft) ApplyEntry() {
 		rf.mu.Unlock()
 		//这一块耗时很高，需要并发???
 		for _, e := range entryToApply {
+			DPrintf("[ApplyEntry] %v apply %v", rf.LogPrefix(), e)
 			rf.applyCh <- ApplyMsg{
 				CommandValid: true,
 				CommandIndex: e.Index,

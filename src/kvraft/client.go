@@ -5,7 +5,6 @@ import (
 	"math/big"
 
 	"6.824/labrpc"
-	"6.824/raft"
 )
 
 type Clerk struct {
@@ -27,6 +26,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	ck.clientID = nrand()
+	DPrintf("make client|[%v]", ck.clientID)
 	// You'll have to add code here.
 	return ck
 }
@@ -48,26 +48,24 @@ func (ck *Clerk) Get(key string) string {
 	// You will have to modify this function.
 
 	args := &GetArgs{Key: key}
-	reply := &GetReply{}
+
 	//TODO: which server to call
 	for {
-		ok := ck.servers[ck.leaderID].Call("KVServer.Get", &args, &reply)
+		DPrintf("client|[%v] call server|[%v]  GET with %+vargs", ck.clientID, ck.leaderID, *args)
+		reply := &GetReply{}
+		ok := ck.servers[ck.leaderID].Call("KVServer.Get", args, reply)
 		if !ok {
-			raft.DPrintf("call server GET system err")
-			continue
+			DPrintf("client|[%v] call GET %+v server|[%v]server GET system err", ck.clientID, *args, ck.leaderID)
 		}
-		if reply.Err != "" {
-			raft.DPrintf("call server GET err: %v", reply.Err)
-			if reply.Err == ErrWrongLeader {
-				if reply.LeaderID < len(ck.servers) {
-					ck.leaderID = reply.LeaderID
-				} else {
-					ck.leaderID = (ck.leaderID + 1) % len(ck.servers)
-				}
+		if !ok || (reply.Err == ErrWrongLeader || reply.Err == ErrTimeout) {
+			DPrintf("client|[%v] call GET %+v server|[%v] GET err: %v", ck.clientID, *args, ck.leaderID, reply.Err)
+			ck.leaderID = (ck.leaderID + 1) % len(ck.servers)
 
-			}
 			continue
 		}
+
+		DPrintf("client|[%v] call server|[%v] suncc  GET with %+vargs get reply %+v",
+			ck.clientID, ck.leaderID, *args, *reply)
 		return reply.Value
 	}
 
@@ -87,26 +85,24 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
 	ck.commandID++
 	args := &PutAppendArgs{Key: key, Value: value, Op: op, ClientID: ck.clientID, CommandID: ck.commandID}
-	reply := &PutAppendReply{}
 	//TODO: which server to call
 	for {
-		ok := ck.servers[ck.leaderID].Call("KVServer.PutAppend", &args, &reply)
+		DPrintf("client|[%v] call server|[%v] PutAppend with %+vargs", ck.clientID, ck.leaderID, *args)
+		reply := &PutAppendReply{}
+		ok := ck.servers[ck.leaderID].Call("KVServer.PutAppend", args, reply)
 		if !ok {
-			raft.DPrintf("call server PutAppend system err")
-			continue
+			DPrintf("client|[%v] call server|[%v] PutAppend get systm err", ck.clientID, ck.leaderID)
 		}
-		if reply.Err != "" {
-			raft.DPrintf("call server PutAppend err: %v", reply.Err)
-			if reply.Err == ErrWrongLeader {
-				if reply.LeaderID < len(ck.servers) {
-					ck.leaderID = reply.LeaderID
-				} else {
-					ck.leaderID = (ck.leaderID + 1) % len(ck.servers)
-				}
 
-			}
+		if (!ok) || (reply.Err == ErrWrongLeader || reply.Err == ErrTimeout) {
+			DPrintf("client|[%v] call server|[%v] PutAppend %+v get err %v", ck.clientID, ck.leaderID, *args, reply.Err)
+
+			ck.leaderID = (ck.leaderID + 1) % len(ck.servers)
+
 			continue
 		}
+		DPrintf("client|[%v] call server|[%v] suncc  PutAppend with %+v args get reply %+v",
+			ck.clientID, ck.leaderID, *args, *reply)
 		return
 	}
 }

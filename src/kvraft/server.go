@@ -11,13 +11,13 @@ import (
 	"6.824/raft"
 )
 
-const Debug = false
+const Debug = true
 const ReqTimeout = 3 * time.Second
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug {
-		log.Printf(format, a...)
-	}
+
+	log.Printf(format, a...)
+
 	return
 }
 
@@ -54,20 +54,27 @@ type KVServer struct {
 	// Your definitions here.
 }
 
-func (kv *KVServer) GetNotifyCh(CommandIndex int) chan CommandReply {
-	kv.mu.Lock()
-	ch := kv.notifyChan[CommandIndex]
-	kv.mu.Unlock()
+func (kv *KVServer) GetNotifyCh(index int) chan CommandReply {
+	if _, ok := kv.notifyChan[index]; !ok {
+		kv.notifyChan[index] = make(chan CommandReply)
+	}
+	ch := kv.notifyChan[index]
 	return ch
 }
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
+	DPrintf("server[%v] get GET req %v", kv.me, *args)
 	c := Command{Op: OpGet, Key: args.Key}
+	reply.LeaderID = -1
 	index, _, isLeader := kv.rf.Start(c)
 	if !isLeader {
+		DPrintf("no leader server[%v] get Get req %+v", kv.me, *args)
+
 		reply.Err = ErrWrongLeader
 		return
 	}
+	kv.mu.Lock()
 	ch := kv.GetNotifyCh(index)
+	kv.mu.Unlock()
 	select {
 	case r := <-ch:
 		reply.Value = r.Value
@@ -76,32 +83,49 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		reply.Err = ErrTimeout
 
 	}
-	// Your code here.
+	go func() {
+		kv.mu.Lock()
+		delete(kv.notifyChan, index)
+		kv.mu.Unlock()
+	}()
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-
-	if kv.isDup(args.ClientID, args.CommandID) {
-		kv.mu.Lock()
-		DPrintf("client %v command %v dup", args.ClientID, args.CommandID)
+	DPrintf("server[%v] get PutAppend req %v", kv.me, *args)
+	reply.LeaderID = -1
+	kv.mu.Lock()
+	isDup := kv.isDup(args.ClientID, args.CommandID)
+	kv.mu.Unlock()
+	if isDup {
+		DPrintf("client %+v command %+v dup", args.ClientID, args.CommandID)
 		reply.Err = kv.lastReply[args.ClientID].Err
-		kv.mu.Unlock()
 		return
 	}
+
 	// Your code here.
-	c := Command{ClientID: args.ClientID, CommandID: args.CommandID, Op: args.Op}
+	c := Command{ClientID: args.ClientID, CommandID: args.CommandID, Op: args.Op, Key: args.Key, Value: args.Value}
 	index, _, isLeader := kv.rf.Start(c)
 	if !isLeader {
+		DPrintf("no leader server[%v] get PutAppend req %+v", kv.me, *args)
+
 		reply.Err = ErrWrongLeader
 		return
 	}
 	ch := kv.GetNotifyCh(index)
 	select {
 	case r := <-ch:
+		DPrintf("server|[%v] PutAppend req %+v get apply reply %+v", kv.me, *args, r)
 		reply.Err = r.Err
+
 	case <-time.After(ReqTimeout):
+		DPrintf("server|[%v] PutAppend req %+v timeout", kv.me, *args)
 		reply.Err = ErrTimeout
 	}
+	go func() {
+		kv.mu.Lock()
+		delete(kv.notifyChan, index)
+		kv.mu.Unlock()
+	}()
 }
 
 //
@@ -126,18 +150,17 @@ func (kv *KVServer) killed() bool {
 }
 
 func (kv *KVServer) isDup(clientID, commandID int64) bool {
-	kv.mu.Lock()
-	dup := kv.lastReply[clientID].CommandID == clientID
-	kv.mu.Unlock()
+	dup := kv.lastReply[clientID].CommandID == commandID
 	return dup
 }
 
 func (kv *KVServer) applier() {
 	for !kv.killed() {
-
 		msg := <-kv.applyCh
 		r := CommandReply{}
+		DPrintf("server|[%v] receive apply command %+v", kv.me, msg)
 		if msg.CommandValid {
+			kv.mu.Lock()
 			c := msg.Command.(Command)
 			if c.Op == OpGet {
 				v, ok := kv.st.Get(c.Key)
@@ -148,23 +171,30 @@ func (kv *KVServer) applier() {
 				}
 			} else {
 				if kv.isDup(c.ClientID, c.CommandID) {
-					DPrintf("client %v command %v already apply", c.ClientID, c.CommandID)
-					r.Err = kv.lastReply[c.ClientID].Err
+					DPrintf("client %+vcommand %+valready apply", c.ClientID, c.CommandID)
+					r = kv.lastReply[c.ClientID]
 				} else {
 					if c.Op == OpAppend {
-						ok := kv.st.Append(c.Key, c.Value)
-						if !ok {
-							r.Err = ErrNoKey
-						}
+						kv.st.Append(c.Key, c.Value)
 					} else {
 						kv.st.Put(c.Key, c.Value)
 					}
 				}
 			}
-			kv.mu.Lock()
-			kv.lastReply[args.clientID]=kv.
-			ch := kv.notifyChan[msg.CommandIndex]
-			ch <- r
+			DPrintf("server|[%v] success apply %+vto state", kv.me, msg)
+			r.CommandID = c.CommandID
+			if c.Op != OpGet {
+				kv.lastReply[c.ClientID] = r
+			}
+			if _, isLeader := kv.rf.GetState(); isLeader {
+				DPrintf("server|[%v] notify  goroutine  with msg %+vand reply %+v", kv.me, msg, r)
+				nf := kv.GetNotifyCh(msg.CommandIndex)
+				nf <- r
+			} else {
+				DPrintf("server|[%v] not  leader,no need to notify %v", kv.me, msg)
+
+			}
+			kv.mu.Unlock()
 		} else {
 			DPrintf("command %+v invalid", msg)
 		}
@@ -190,6 +220,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
+	labgob.Register(Command{})
 
 	kv := new(KVServer)
 	kv.me = me
@@ -201,7 +232,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.lastReply = map[int64]CommandReply{}
 	kv.notifyChan = make(map[int]chan CommandReply)
-	kv.st = &store{}
+	kv.st = &store{mu: sync.RWMutex{}, value: map[string]string{}}
+	DPrintf("make server|[%v] all peer num %v", me, len(servers))
 	// You may need initialization code here.
 	go kv.applier()
 

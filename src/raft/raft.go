@@ -248,7 +248,7 @@ func (rf *Raft) killed() bool {
 //
 func (rf *Raft) StartElection() {
 	//rf.mu.Lock()不能在主协程加锁，cuz外部有锁
-	//DPrintf("%s start election", rf.LogPrefix())
+	DPrintf("%s start election", rf.LogPrefix())
 	rf.voteFor = rf.me
 	grantCnt := 1
 	req := rf.genRequestVoteArgs()
